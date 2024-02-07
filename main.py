@@ -1,95 +1,94 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
+import torchvision.models as models
 
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(64 * 7 * 7, 128)
-        self.fc2 = nn.Linear(128, 10)
+# 데이터셋에 대한 전처리 정의
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
 
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 64 * 7 * 7)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+# CIFAR-10 훈련 및 테스트 데이터셋 로드
+train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True,
+                                             download=True, transform=transform)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64,
+                                           shuffle=True, num_workers=2)
 
-class WeightManager:
-    def __init__(self, filepath):
-        self.filepath = filepath
+test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False,
+                                            download=True, transform=transform)
+test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=64,
+                                          shuffle=False, num_workers=2)
 
-    def save_weights(self, model):
-        torch.save(model.state_dict(), self.filepath)
-        print(f"Saved weights to {self.filepath}")
+# ResNet-18 모델 로드 및 마지막 레이어 교체
+resnet18 = models.resnet18(pretrained=True)
+num_ftrs = resnet18.fc.in_features
+resnet18.fc = nn.Linear(num_ftrs, 10)  # CIFAR-10은 10개의 클래스를 가짐
 
-    def load_weights(self, model):
-        model.load_state_dict(torch.load(self.filepath))
-        print(f"Loaded weights from {self.filepath}")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+resnet18 = resnet18.to(device)
 
-def main():
-    # 데이터셋 준비
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    train_dataset = datasets.MNIST('./data', download=True, train=True, transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+# 손실 함수 및 옵티마이저 설정
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(resnet18.parameters(), lr=0.001, momentum=0.9)
 
-    # 테스트 데이터셋 로딩
-    test_dataset = datasets.MNIST('./data', download=True, train=False, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
-    # 모델, 손실 함수, 최적화 알고리즘 초기화
-    model = SimpleCNN()
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters())
+# 훈련 함수
+def train(model, device, train_loader, criterion, optimizer, num_epochs=10):
+    model.train()
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for i, data in enumerate(train_loader, 0):
+            inputs, labels = data[0].to(device), data[1].to(device)
 
-    # 학습
-    for epoch in range(3):  # 간단한 예제를 위해 1 에폭만 실행
-        for data, target in train_loader:
             optimizer.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
+
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-        print(f"Epoch {epoch}: Completed")
 
-    # 가중치 저장
-    weight_manager = WeightManager('./model_weights.pth')
-    weight_manager.save_weights(model)
+            running_loss += loss.item()
+            if i % 200 == 199:  # print every 200 mini-batches
+                print(f'[{epoch + 1}, {i + 1}] loss: {running_loss / 200:.3f}')
+                running_loss = 0.0
 
-    # 가중치 불러오기 및 추론 준비
-    model = SimpleCNN()  # 새 모델 인스턴스 생성
-    weight_manager.load_weights(model)
 
-    def test(model, device, test_loader):
-        model.eval()  # 모델을 추론 모드로 설정
-        correct = 0
-        total = 0
-        with torch.no_grad():  # 추론 시에는 기울기를 계산할 필요가 없습니다
-            for data, target in test_loader:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                _, predicted = torch.max(output.data, 1)
-                total += target.size(0)
-                correct += (predicted == target).sum().item()
+# 훈련 실행
+train(resnet18, device, train_loader, criterion, optimizer, num_epochs=2)
 
-        print(f'Accuracy of the model on the test images: {100 * correct / total}%')
 
-    # 모델을 CPU나 GPU에 배치 (사용 가능한 경우)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+# 추론 및 정확도 계산 함수
+def test(model, device, test_loader):
+    model.eval()
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for data in test_loader:
+            images, labels = data[0].to(device), data[1].to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-    # 테스트 함수 호출
-    test(model, device, test_loader)
+    print(f'Accuracy of the model on the 10000 test images: {100 * correct / total}%')
 
-if __name__ == "__main__":
-    main()
+
+# 추론 실행
+test(resnet18, device, test_loader)
+
+import torchvision.models as models
+
+# 사전 훈련된 ResNet-18 모델 로드
+resnet18 = models.resnet18(pretrained=True)
+
+# 모델의 모든 컨볼루션 레이어를 순회하며 3x3 필터를 사용하는 레이어의 파라미터 확인
+for name, module in resnet18.named_modules():
+    if isinstance(module, torch.nn.Conv2d) and module.kernel_size == (3, 3):
+        print(f"Layer: {name}")
+        print(f"Parameters: {list(module.parameters())}")
+        print("-----")
